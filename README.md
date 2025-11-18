@@ -272,6 +272,56 @@ Handles table schema generation and database design:
 - Optimizes schema for performance
 - Includes indexing recommendations
 
+
+## Final Semantic View: final_market_signals (Canonical Market Signals Layer)
+### Purpose:
+This view aggregates market signals from GitHub, News, and Reddit and provides a single semantic dataset for Wave AI idea regeneration. It is the canonical source for market signals used by the backend.
+
+### Sources:
+- f_github_api (flattened GitHub API)
+- f_news_api (flattened News API)
+- f_reddit_api (flattened Reddit API)
+- Optional: esg (ESG dataset)
+
+### Join logic:
+- LEFT JOIN f_news_api ON semantic_match(lower(f_github_api.name_github), lower(f_news_api.title_news)) or keyword match
+- LEFT JOIN f_reddit_api ON semantic_match(lower(f_github_api.name_github), lower(f_reddit_api.title))
+- Use fuzzy/semantic similarity scoring as a secondary join key (composite_similarity_score)
+- Duplicate removal: prefer the row with highest composite_validation_score
+
+### Transformations:
+- Flatten nested JSON fields into atomic columns
+- Compute composite_validation_score = weighted sum(market_weight=0.4, tech_weight=0.3, competition_weight=0.3)
+- Normalize text fields to lowercase and trim whitespace
+- Derive signal_age_days from published timestamps
+
+### Authorization:
+- Data sources use API key / bearer token headers:
+  - GitHub: Authorization: Bearer <GITHUB_TOKEN>
+  - NewsAPI: X-Api-Key: <NEWS_API_KEY>
+  - Reddit: OAuth-based credentials
+- Web service access restricted to internal network; basic auth configured for VDP endpoints
+
+### Optimization & caching:
+- Projection pushdown enabled
+- Cached view with TTL = 1200 seconds for UI performance
+- Index on keyword, composite_validation_score for faster sorting
+
+### Usage:
+- Consumed by backend route: /admin/denodo/sample
+- Used for LLM grounding to produce evidence-backed idea regeneration
+
+### CLI / Testing Commands:
+cd path\to\denodo_import\Data
+python -m http.server 8000
+
+# inspect the Denodo VDP view (PowerShell example)
+Invoke-WebRequest -Uri "http://localhost:9090/server/admin/final_market_signals/views/final_market_signals?%24top=5" -UseBasicParsing | ConvertFrom-Json
+
+# call the backend route that consumes the view
+Invoke-WebRequest -Uri "http://localhost:5000/admin/denodo/sample?q=ai" -UseBasicParsing | ConvertFrom-Json
+
+
 ## Troubleshooting
 - Ensure only one Firebase initialization (use `project/src/firebase/config.ts`).
 - Verify `.env` keys exist for backend and frontend.
@@ -296,16 +346,20 @@ Handles table schema generation and database design:
 
 The `Data/` directory contains curated datasets used for idea validation and market analysis:
 
-- **Tech.json**: Technology trends and stack popularity metrics
-- **Financial.json**: Economic indicators and market sizing data
-- **GK.json**: General knowledge base for competitive analysis
-- **Movies.json**: Entertainment sector trends and data
-- **mental_health.json**: Mental wellness and health tech trends
-- **esg_data.json**: Environmental, Social, and Governance metrics
-- **deliveriess.json**: Logistics and delivery market signals
-- **denodo_data.py**: Script for enriching data with Denodo source integration
+### 🔍 Why We Selected These Datasets
+To validate ideas realistically, Wave AI uses multi-domain datasets that reflect real-world signals across technology, business, creativity, logistics, sustainability, and human impact.
+Each dataset contributes a specific validation dimension:
 
-These datasets are loaded into the validation pipeline to provide contextual market insights.
+- **ESG Dataset:** Provides sustainability and ethical-impact indicators, helping assess whether ideas align with modern global standards.
+- **Tech Dataset:** Captures innovation and technology trends, used to measure technical relevance and future potential.
+- **Financial Dataset:** Helps validate market viability, cost feasibility, and projected growth of ideas.
+- **General Knowledge (GK) Dataset:** Provides broad context for non-technical ideas, improving AI’s general reasoning.
+- **Mental Health Dataset:** Adds human-impact understanding, supporting evaluation of productivity, lifestyle, and well-being concepts.
+- **Movies Dataset:** Represents creative/media trends, valuable for content-driven or entertainment-focused ideas.
+- **Deliveries Dataset:** Provides logistics and operational insights, used to validate on-demand, marketplace, and delivery-based ideas.
+
+Together, these datasets power Wave’s 360° idea-validation framework, enabling the AI to evaluate concepts from multiple practical, technical, and human-centric perspectives.
+
 
 ## Advanced Features
 
@@ -737,6 +791,7 @@ Do not publish or commit real keys. Use environment variables and secured storag
 - `GROQ_API_KEY=your-groq-key`
 - `GEMINI_API_KEY=your-gemini-key`
 - `NEWS_API_KEY=your-newsapi-key`
+- `GITHUB_API_KEY=your-github-key`
 
 ---
 
@@ -814,7 +869,76 @@ Built by the Wave AI: The Idea Graveyard Team.
 This project integrates Denodo as a unified semantic layer for real‑world market signal aggregation and API virtualization.  
 Below is the complete workflow implemented inside Denodo:
 
-### 🔹 Work Done in Denodo
+### Denodo Data Model Diagram
+Wave uses three live API sources (GitHub, News, Reddit) that are virtualized inside Denodo, flattened, joined, and published as a unified semantic view consumed by the backend and AI engine.
+
+                   RAW API DATA SOURCES
+     +-----------------+  +-----------------+  +------------------+
+     |   NEWS_API      |  |  REDDIT_API     |  |  GITHUB_API      |
+     +-----------------+  +-----------------+  +------------------+
+               |                  |                     |
+               v                  v                     v
+
+           BASE VIEWS (Imported from APIs)
+     +-----------------+  +-----------------+  +------------------+
+     | News_Base       |  | Reddit_Base     |  | Github_Base      |
+     +-----------------+  +-----------------+  +------------------+
+               |                  |                     |
+               |                  |                     |
+               v                  v                     v
+
+            FLATTENING / NORMALIZATION LAYER
+     +-----------------+  +-----------------+  +------------------+
+     | News_Flat       |  | Reddit_Flat     |  | Github_Flat      |
+     +-----------------+  +-----------------+  +------------------+
+                \               |                /
+                 \              |               /
+                  \             |              /
+                   \            |             /
+                    \           |            /
+                     \          |           /
+                      \         |          /
+                       \        |         /
+                        \       |        /
+                         v      v       v
+
+                    JOINED DERIVED VIEW
+                 +--------------------------------+
+                 |   combined_market_signals      |
+                 | (News + Reddit + GitHub data)  |
+                 +--------------------------------+
+                                |
+                                v
+
+                   PUBLISHED SEMANTIC VIEW
+                 +--------------------------------+
+                 |    final_market_signals        |
+                 | (Exposed to backend + AI)      |
+                 +--------------------------------+
+                                |
+                                v
+
+                  WAVE AI VALIDATION ENGINE
+                 +--------------------------------+
+                 |  Uses final view for scoring,  |
+                 |  trends, insights, analysis    |
+                 +--------------------------------+
+ Explanation
+
+Base Views
+Raw API responses imported into Denodo.
+
+Flattened Views
+Each API’s nested JSON is normalized for clean rows/columns.
+
+Joined View — combined_market_signals
+Merge GitHub + News + Reddit signals.
+
+Published View — final_market_signals
+The single semantic endpoint consumed by Flask + AI.
+
+
+###  Work Done in Denodo
 
 1. **Created Base Views for All Datasets and APIs**  
    - Loaded multiple datasets into Denodo and created base views.  
@@ -851,14 +975,103 @@ Below is the complete workflow implemented inside Denodo:
      - API fetch status  
      - Response timestamps  
      - Rate‑limit warnings  
-     - Signal completeness levels  
+     - Signal completeness levels 
 
-### 🔹 Visual References  
-Screenshots attached above show:
-- Dataset views  
-- API views  
-- Published semantic layer  
-- Final flattened views
+### Governance & Metadata
 
----
+Wave applies Denodo governance best practices for clarity and traceability.
 
+Naming Conventions
+
+b_ → Base views (b_github_api)
+
+f_ → Flattened views (f_reddit_api)
+
+j_ → Joined/derived views (j_market_signals)
+
+final_market_signals → Published semantic layer
+
+Metadata
+
+-All views include descriptions, business meaning, and tags.
+-Fields include semantic descriptions for Data Catalog.
+
+Data Catalog & Lineage
+
+Shows full path:
+Base → Flattened → Joined → Published.
+
+Folder Structure
+
+/api_sources/
+
+/flattened/
+
+/derived/
+
+/semantic/
+
+## Denodo Optimization Techniques
+
+### Projection Pushdown:
+
+Only necessary columns fetched (reduces payload).
+
+### Filter Pushdown
+
+Keyword & timestamp filters applied at API layer.
+
+### Flatten Optimizations
+
+Flatten views reduce runtime cost for semantic queries.
+
+### Cached Semantic View
+
+TTL = 1200 seconds
+
+Improves backend response times significantly
+
+### Explain Plan Validation
+
+News & Reddit = full pushdown
+
+GitHub = partial pushdown
+
+No excessive intermediate scans
+
+### AI ↔ Denodo Integration Flow:
+
+User → Frontend → Flask Backend  
+       → Denodo Adapter (VQL/REST)  
+       → final_market_signals  
+       → AI Model (LLM)  
+       → Evidence-backed idea regeneration
+
+##  Denodo Troubleshooting (Actual Project)
+
+### ✔ Authentication Issues
+All three API data sources (GitHub, NewsAPI, Reddit) use API keys or bearer tokens.
+
+If authentication fails:
+- Recheck API keys in the Denodo Web Service Data Source → Authentication section.
+- Ensure GitHub uses correct `Authorization: Bearer <TOKEN>`.
+- Ensure NewsAPI uses correct `X-Api-Key`.
+- Ensure Reddit OAuth token is valid and refreshed.
+- Environment variables must be correctly passed to the backend and never hardcoded.
+
+### ✔ Access Control / Basic Auth
+The final published semantic view (`final_market_signals`) is protected using:
+- Basic Authentication at the VDP endpoint
+- Controlled exposure only to internal backend
+
+If access fails:
+- Verify correct username/password in backend’s Denodo adapter.
+- Ensure the role has execution permission on the published view.
+
+
+ 
+----
+
+
+github link - https://github.com/Krish-1507/wave-ai 
+project link - https://wave-ai-idea-graveyard.web.app/
